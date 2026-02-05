@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  clinic_bot_app:
+    build: .
+    container_name: clinic_bot_app
+    restart: always
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - MONGO_URI=mongodb://clinic_bot_db:27017/clinic_bot
+      - REDIS_HOST=zasya_redis
+    depends_on:
+      - mongodb
+    networks:
+      - zasya_network
+
+  mongodb:
+    image: mongo:latest
+    container_name: clinic_bot_db
+    restart: always
+    ports:
+      - "27017:27017"
+    networks:
+      - zasya_network
+    volumes:
+      - clinic_mongodb_data:/data/db
+
+networks:
+  zasya_network:
+    external: true
+
+volumes:
+  clinic_mongodb_data:
