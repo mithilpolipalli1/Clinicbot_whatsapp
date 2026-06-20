@@ -27,6 +27,7 @@ const AppointmentSchema = new mongoose.Schema({
     date: String,
     slot: String,
     issue: String,
+    status: { type: String, default: 'PENDING' },
     createdAt: { type: Date, default: Date.now }
 });
 

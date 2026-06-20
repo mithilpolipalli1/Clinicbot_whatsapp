@@ -1,13 +1,18 @@
-# Dockerfile
-FROM node:18-alpine
+FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc && rm -rf /var/lib/apt/lists/*
 
-COPY . .
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY main.py .
+COPY .env .
 
 EXPOSE 3000
+ENV PORT=3000
 
-CMD ["node", "server.js"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "3000", "--workers", "2"]

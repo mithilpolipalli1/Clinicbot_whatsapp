@@ -65,43 +65,7 @@ class SessionManager {
 
 app.use(bodyParser.json());
 
-// ------------------------------------------------
-// 📤 SEND MESSAGE FUNCTION
-// ------------------------------------------------
-
 const TIME_SLOTS = ["10:00 AM", "10:30 AM", "11:00 AM", "11:30 AM", "04:00 PM", "04:30 PM"];
-
-// ------------------------------------------------
-// 📤 SEND MESSAGE FUNCTION
-// ------------------------------------------------
-async function sendWhatsappMessage(toNumber, text, imageUrl = null) {
-    const headers = {
-        "authkey": process.env.MSG91_AUTH_KEY,
-        "Content-Type": "application/json"
-    };
-
-    let payload = {
-        "integrated_number": process.env.MSG91_INTEGRATED_NUMBER,
-        "content_type": imageUrl ? "media_card" : "text",
-        "payload": {
-            "to": toNumber,
-            "type": imageUrl ? "media_card" : "text",
-        }
-    };
-
-    if (imageUrl) {
-        payload.payload.media_card = { "media_url": imageUrl, "body_content": text };
-    } else {
-        payload.payload.text = { "body": text };
-    }
-
-    try {
-        await axios.post("https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/custom/message", payload, { headers });
-        console.log(`📤 Message sent to ${toNumber}`);
-    } catch (error) {
-        console.error("🚨 MSG91 Error:", error.response ? error.response.data : error.message);
-    }
-}
 
 // ------------------------------------------------
 // 🧠 CLINIC BOT LOGIC ENGINE
@@ -139,14 +103,23 @@ async function processMessage(session, input, phone) {
                 listOutput += `\n0️⃣ Back to Main Menu\n\n👉 *Type the number to select.*`;
                 return { text: listOutput, image: "https://i.ibb.co/mSR4G8D/dept-icon.png" };
             } else if (input === '2') {
-                const appointments = await Appointment.find({ phone: phone }).sort({ createdAt: -1 });
+                // Delete ALL past appointments (anything before today's date)
+                const todayStr = new Date().toISOString().split('T')[0];
+                await Appointment.deleteMany({ date: { $lt: todayStr } });
+
+                // Fetch only Confirmed and Upcoming (Today or Future)
+                const appointments = await Appointment.find({
+                    phone: phone,
+                    status: 'CONFIRMED',
+                    date: { $gte: todayStr }
+                }).sort({ date: 1, slot: 1 });
+
                 if (appointments.length === 0) {
-                    return { text: "❌ No appointments found for your number.\n\nType *1* to book a new appointment.", image: null };
+                    return { text: "❌ No upcoming appointments found.\n\nType *1* to book a new appointment.", image: null };
                 }
 
-                let response = "� *Your Appointments:*\n";
-                // Show last 3 appointments to keep message clean
-                appointments.slice(0, 3).forEach((apt) => {
+                let response = "🩺 *Active Appointments:*\n";
+                appointments.forEach((apt) => {
                     response += `\n━━━━━━━━━━━━━━\n🆔 *${apt.appointmentId}*\n👤 Name: ${apt.patientName}\n👨‍⚕️ Dr: ${apt.doctor}\n🗓️ ${apt.date} @ ${apt.slot}\n📝 Issue: ${apt.issue}`;
                 });
                 response += "\n\nType 'hi' to return to main menu.";
@@ -192,10 +165,18 @@ async function processMessage(session, input, phone) {
             return { text: "❌ Invalid Doctor selection.", image: null };
 
         case 'SELECT_DATE':
-            const dateLabel = (input === '1') ? "Today" : (input === '2' ? "Tomorrow" : input);
-            session.bookingData.date = dateLabel;
+            let finalDate = input;
+            if (input === '1') {
+                finalDate = new Date().toISOString().split('T')[0]; // Today
+            } else if (input === '2') {
+                const tom = new Date();
+                tom.setDate(tom.getDate() + 1);
+                finalDate = tom.toISOString().split('T')[0]; // Tomorrow
+            }
+
+            session.bookingData.date = finalDate;
             session.step = 'SELECT_SLOT';
-            let slotPicker = `Date selected: *${dateLabel}*\n\n⏰ *Select a Time Slot:*\n`;
+            let slotPicker = `Date selected: *${finalDate}*\n\n⏰ *Select a Time Slot:*\n`;
             TIME_SLOTS.forEach((sl, i) => slotPicker += `\n${i + 1}️⃣ ${sl}`);
             slotPicker += `\n0️⃣ Back to Main Menu\n\n👉 *Type the number to select.*`;
             return { text: slotPicker, image: "https://i.ibb.co/TBPGz1N/clock-icon.png" };
@@ -231,17 +212,49 @@ async function processMessage(session, input, phone) {
 
         case 'CONFIRM_BOOKING':
             if (input === '1') {
+                const amount = 200; // Consultation Fee
                 const aptId = 'APT-' + Math.floor(1000 + Math.random() * 8999);
+
+                // SAVE AS PENDING
                 await new Appointment({
                     phone: phone,
                     appointmentId: aptId,
+                    status: 'PENDING',
                     ...session.bookingData
                 }).save();
-                session.step = 'START';
-                return { text: `✅ *Confirmed!*\nID: *${aptId}*\n\nYour appointment is booked. You can view it anytime by selecting 'View Appointment' from the menu.\n\nType 'hi' to start over.`, image: null };
+
+                const payLink = `http://18.61.156.35/pay?am=${amount}`;
+                const upiId = process.env.UPI_ID;
+                const merchantName = encodeURIComponent(process.env.MERCHANT_NAME || "Mithil Polipalli");
+                const upiData = `upi://pay?pa=${upiId}&pn=${merchantName}&am=${amount}&cu=INR`;
+                const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiData)}`;
+
+                session.step = 'CONFIRM_PAYMENT';
+                return {
+                    text: `💳 *Consultation Fee Required*\n\nTo confirm your appointment, please pay the consultation fee of *₹${amount}*.\n\n👉 *Click to Pay:* ${payLink}\n\nScan the QR code below and type *1* or *Paid* once done.`,
+                    image: qrUrl
+                };
             }
             session.step = 'MAIN_MENU';
             return { text: "❌ Cancelled. Returning to Main Menu.", image: null };
+
+        case 'CONFIRM_PAYMENT':
+            if (input === '1' || input.toLowerCase().includes('paid')) {
+                // UPDATE PENDING TO CONFIRMED
+                const lastApt = await Appointment.findOneAndUpdate(
+                    { phone: phone, status: 'PENDING' },
+                    { status: 'CONFIRMED' },
+                    { sort: { createdAt: -1 } }
+                );
+
+                session.step = 'START';
+                return {
+                    text: `✅ *Confirmed & Paid!*\nID: *${lastApt ? lastApt.appointmentId : 'Unknown'}*\n\nThank you for the payment. Your appointment is successfully booked.\n\nType 'hi' to start over.`,
+                    image: null
+                };
+            }
+            session.step = 'MAIN_MENU';
+            return { text: "🚫 Payment not verified. Returning to menu.", image: null };
 
         default:
             session.step = 'MAIN_MENU';
@@ -295,15 +308,9 @@ app.post('/webhook/msg91', async (req, res) => {
             console.error("❌ Clinic: Redis Save Error", e.message);
         }
 
-        // 4. Respond to Router
-        if (req.body.isRouter || req.body.phone) {
-            console.log("✅ Clinic: Returning JSON to Router");
-            return res.json({ text: responseMsg.text, image: responseMsg.image });
-        }
-
-        // 5. Fallback for direct MSG91
-        await sendWhatsappMessage(userNum, responseMsg.text, responseMsg.image);
-        res.json({ status: "ok" });
+        // 4. Respond to Router (always return JSON)
+        console.log("✅ Clinic: Returning JSON to Router");
+        return res.json({ text: responseMsg.text, image: responseMsg.image });
     } catch (err) {
         console.error("🚨 Clinic: Webhook Critical Error:", err);
         res.status(500).json({ error: "Internal Server Error" });
